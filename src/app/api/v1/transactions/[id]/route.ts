@@ -4,7 +4,8 @@ import { z } from "zod";
 import { withTransaction } from "@/lib/db";
 import { usuarioIdActual } from "@/lib/usuario";
 import { recordarComercio } from "@/lib/categorizar";
-import { eliminarTransaccion } from "@/lib/registrar";
+import { eliminarTransaccion, editarTransaccion, ErrorRegistro } from "@/lib/registrar";
+import { parsearMonto, MONEDAS_SOPORTADAS } from "@/lib/parseo";
 import { buscarCompanero, recordarDivision, olvidarDivision, PORCENTAJE_PROPIO_DEFECTO } from "@/lib/companeros";
 
 export const runtime = "nodejs";
@@ -17,8 +18,27 @@ const Schema = z
     companero_id: z.uuid().nullable().optional(),
     porcentaje_propio: z.number().gt(0).lt(100).optional(), // tu parte; 50 por defecto
     recordar_division: z.boolean().optional(),              // con companero_id: dividir siempre este comercio; con null: olvidarlo
+    // Edición del movimiento (todo opcional; lo que no se envía se conserva)
+    monto: z.union([z.number(), z.string()]).optional(),
+    moneda: z.enum(MONEDAS_SOPORTADAS).optional(),
+    comercio: z.string().trim().min(1).max(200).optional(),
+    tipo: z.enum(["ingreso", "egreso"]).optional(),
+    cuenta_id: z.uuid().optional(),
+    fecha: z.iso.date().optional(),                          // YYYY-MM-DD en tu zona horaria
+    hora: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(), // HH:MM en tu zona horaria
   })
-  .refine((b) => b.categoria_id !== undefined || b.companero_id !== undefined, { message: "Nada que actualizar" });
+  .refine(
+    (b) => [b.categoria_id, b.companero_id, b.monto, b.moneda, b.comercio, b.tipo, b.cuenta_id, b.fecha, b.hora].some((v) => v !== undefined),
+    { message: "Nada que actualizar" },
+  );
+
+const MENSAJES: Record<string, string> = {
+  MONTO_NO_RECONOCIDO: "El importe no es válido",
+  MONEDA_NO_SOPORTADA: "Esa moneda no está soportada",
+  COMERCIO_VACIO: "El concepto no puede quedar vacío",
+  CUENTA_NO_ENCONTRADA: "No se encontró esa cuenta",
+  FECHA_FUTURA: "La fecha y la hora no pueden ser futuras",
+};
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -36,6 +56,18 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   try {
     const actualizada = await withTransaction(async (client) => {
       let encontrada = false;
+
+      // Editar importe, moneda, concepto, tipo, cuenta, fecha u hora: recalcula también el saldo
+      if ([body.monto, body.moneda, body.comercio, body.tipo, body.cuenta_id, body.fecha, body.hora].some((v) => v !== undefined)) {
+        const monto = body.monto === undefined ? undefined : parsearMonto(body.monto);
+        if (body.monto !== undefined && !monto) throw new ErrorRegistro("MONTO_NO_RECONOCIDO", 422);
+        const r = await editarTransaccion(client, usuarioId, id, {
+          monto: monto ?? undefined, moneda: body.moneda, comercio: body.comercio, tipo: body.tipo,
+          cuentaId: body.cuenta_id, fechaLocal: body.fecha, horaLocal: body.hora,
+        });
+        if (!r) return null;
+        encontrada = true;
+      }
 
       if (body.categoria_id) {
         const upd = await client.query<{ descripcion: string | null }>(
@@ -88,6 +120,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     }
     return NextResponse.json({ ok: true, transaccion_id: id, categoria_id: body.categoria_id ?? null, recordado: body.categoria_id ? body.recordar : false, companero_id: body.companero_id ?? null });
   } catch (err) {
+    if (err instanceof ErrorRegistro) {
+      return NextResponse.json({ ok: false, codigo: err.codigo, mensaje: MENSAJES[err.codigo] ?? `No se pudo guardar (${err.codigo})` }, { status: err.status });
+    }
     const status = (err as { status?: number }).status;
     if (status === 404) return NextResponse.json({ ok: false, mensaje: "Compañero no encontrado" }, { status: 404 });
     console.error("[PATCH transaccion]", err);

@@ -88,9 +88,12 @@ export default async function Dashboard() {
                   <p className="truncate font-medium">{t.descripcion || "Sin descripción"}</p>
                   <p className="text-xs text-slate-500">{t.categoria ?? "Por clasificar"} · {new Intl.DateTimeFormat("es", { day: "2-digit", month: "short" }).format(new Date(t.fecha_hora))}</p>
                 </div>
-                <div className="shrink-0 text-right tabular-nums">
-                  <p className={t.tipo === "egreso" ? "text-red-600" : "text-emerald-600"}>{t.tipo === "egreso" ? "−" : "+"}{fmt(t.montoPrincipal)}</p>
-                  {t.moneda !== r.moneda ? <p className="text-xs text-slate-400">{formatoMoneda(t.monto, t.moneda)}</p> : null}
+                <div className="flex shrink-0 items-center gap-2">
+                  <div className="text-right tabular-nums">
+                    <p className={t.tipo === "egreso" ? "text-red-600" : "text-emerald-600"}>{t.tipo === "egreso" ? "−" : "+"}{fmt(t.montoPrincipal)}</p>
+                    {t.moneda !== r.moneda ? <p className="text-xs text-slate-400">{formatoMoneda(t.monto, t.moneda)}</p> : null}
+                  </div>
+                  <Link href={`/editar/${t.id}`} aria-label={`Editar ${t.descripcion || "movimiento"}`} className="rounded-lg px-2 py-1 text-xs text-slate-500 active:bg-slate-100">✎</Link>
                 </div>
               </li>
             ))}

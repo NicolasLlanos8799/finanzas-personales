@@ -258,3 +258,40 @@ export async function obtenerConexion(usuarioId: string): Promise<Conexion> {
     ultimoResultado: r?.ultimo_webhook_resultado ?? null,
   };
 }
+
+export interface TransaccionEditable {
+  id: string;
+  tipo: "ingreso" | "egreso";
+  monto: number;
+  moneda: string;
+  descripcion: string;
+  categoriaId: string | null;
+  esPorClasificar: boolean;
+  cuentaId: string;
+  fechaLocal: string; // YYYY-MM-DD en la zona del usuario
+  horaLocal: string;  // HH:MM en la zona del usuario
+  companeroId: string | null;
+  porcentajePropio: number;
+}
+
+/** Un movimiento del usuario con fecha y hora en SU zona horaria, listo para el formulario de edición. */
+export async function obtenerTransaccion(usuarioId: string, id: string): Promise<TransaccionEditable | null> {
+  const { rows } = await pool.query<{
+    id: string; tipo: "ingreso" | "egreso"; monto: string; moneda: string; descripcion: string | null; categoria_id: string | null; es_por_clasificar: boolean | null;
+    cuenta_id: string; fecha_local: string; hora_local: string; companero_id: string | null; porcentaje_propio: string;
+  }>(
+    `SELECT id, tipo, monto, moneda, descripcion, categoria_id, es_por_clasificar, cuenta_id,
+            to_char(fecha_local, 'YYYY-MM-DD') AS fecha_local,
+            to_char((fecha_hora AT TIME ZONE 'UTC') AT TIME ZONE zona_horaria, 'HH24:MI') AS hora_local,
+            companero_id, porcentaje_propio
+       FROM v_transacciones_principal WHERE id = $1 AND usuario_id = $2`,
+    [id, usuarioId],
+  );
+  const r = rows[0];
+  if (!r) return null;
+  return {
+    id: r.id, tipo: r.tipo, monto: Number(r.monto), moneda: r.moneda, descripcion: r.descripcion ?? "",
+    categoriaId: r.categoria_id, esPorClasificar: !!r.es_por_clasificar, cuentaId: r.cuenta_id,
+    fechaLocal: r.fecha_local, horaLocal: r.hora_local, companeroId: r.companero_id, porcentajePropio: Number(r.porcentaje_propio),
+  };
+}

@@ -97,6 +97,7 @@ export default async function DetalleMes({ params }: { params: Promise<{ mes: st
                       {t.companero && <p className="text-xs text-sky-700">tu parte {fmt(t.montoPropio)}{t.saldada ? " · saldado" : ""}</p>}
                       {t.moneda !== d.moneda && <p className="text-xs text-slate-400">{formatoMoneda(t.monto, t.moneda)}</p>}
                     </div>
+                    <Link href={`/editar/${t.id}`} aria-label={`Editar ${t.descripcion || "movimiento"}`} className="rounded-lg px-2 py-1 text-xs text-slate-500 active:bg-slate-100">✎</Link>
                     {t.tipo === "egreso" && (
                       <BotonDividir id={t.id} companeros={companeros} actual={{ companeroId: t.companeroId, nombre: t.companero, porcentajePropio: t.porcentajePropio }} />
                     )}
