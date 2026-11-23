@@ -1,0 +1,165 @@
+// src/lib/registrar.ts — lógica única de alta de movimientos (webhook iOS y formulario manual)
+import type { PoolClient } from "pg";
+import { resolverCategoria, type CategoriaResuelta, type TipoTransaccion } from "@/lib/categorizar";
+import { asegurarTasasDelDia } from "@/lib/cambio";
+import { MONEDAS_SOPORTADAS } from "@/lib/parseo";
+
+export type OrigenInsercion = "Webhook_iOS" | "Manual_Web" | "Importacion";
+
+export interface EntradaRegistro {
+  usuarioId: string;
+  monedaPrincipal: string;
+  cuentaId?: string;          // prioridad sobre cuentaIdent
+  cuentaIdent?: string;       // identificador_notificacion
+  monto: number;
+  moneda?: string;            // por defecto, la de la cuenta
+  comercio: string;
+  tipo: TipoTransaccion;
+  categoriaId?: string;       // si falta, se resuelve por diccionario/memoria
+  fechaLocal?: string;        // YYYY-MM-DD en la zona del usuario (formulario manual)
+  fechaHoraIso?: string;      // ISO 8601 con offset (webhook)
+  textoOriginal?: string;
+  origen: OrigenInsercion;
+  hashDedup?: string | null;
+}
+
+export interface CuentaRow { id: string; nombre_cuenta: string; saldo_actual: string; moneda: string }
+
+export type ResultadoRegistro =
+  | { duplicado: true; transaccionId: string; comercio: string; monto: number; moneda: string }
+  | {
+      duplicado: false;
+      transaccionId: string;
+      fechaHora: string;
+      cuenta: CuentaRow;
+      categoria: CategoriaResuelta;
+      tipo: TipoTransaccion;
+      monto: number;
+      moneda: string;
+      comercio: string;
+      saldoNuevo: number;
+      montoPrincipal: number | null;
+    };
+
+export class ErrorRegistro extends Error {
+  constructor(public codigo: string, public status: number) { super(codigo); }
+}
+
+export async function registrarTransaccion(client: PoolClient, e: EntradaRegistro): Promise<ResultadoRegistro> {
+  // 1. Cuenta bloqueada
+  const cuentaRes = await client.query<CuentaRow>(
+    `SELECT id, nombre_cuenta, saldo_actual, moneda
+       FROM cuentas_bancarias
+      WHERE usuario_id = $1
+        AND ($2::uuid IS NULL OR id = $2)
+        AND ($3::text IS NULL OR identificador_notificacion = $3)
+      ORDER BY creado_en ASC LIMIT 1 FOR UPDATE`,
+    [e.usuarioId, e.cuentaId ?? null, e.cuentaIdent ?? null],
+  );
+  const cuenta = cuentaRes.rows[0];
+  if (!cuenta) throw new ErrorRegistro("CUENTA_NO_ENCONTRADA", 404);
+
+  const moneda = e.moneda && (MONEDAS_SOPORTADAS as readonly string[]).includes(e.moneda) ? e.moneda : cuenta.moneda;
+  const monto = Math.round(e.monto * 100) / 100;
+  if (!(monto > 0)) throw new ErrorRegistro("MONTO_NO_RECONOCIDO", 422);
+  const comercio = e.comercio.trim();
+  if (!comercio) throw new ErrorRegistro("COMERCIO_NO_RECONOCIDO", 422);
+
+  // 2. Idempotencia (solo webhook)
+  if (e.hashDedup) {
+    const dup = await client.query<{ id: string }>(`SELECT id FROM transacciones WHERE hash_dedup = $1`, [e.hashDedup]);
+    if (dup.rows[0]) return { duplicado: true, transaccionId: dup.rows[0].id, comercio, monto, moneda };
+  }
+
+  // 3. Cotización del día
+  await asegurarTasasDelDia(client);
+
+  // 4. Categoría
+  let categoria: CategoriaResuelta;
+  if (e.categoriaId) {
+    const c = await client.query<{ id: string; nombre_categoria: string; es_por_clasificar: boolean }>(
+      `SELECT id, nombre_categoria, es_por_clasificar FROM categorias WHERE id = $1 AND usuario_id = $2 AND tipo = $3::tipo_transaccion`,
+      [e.categoriaId, e.usuarioId, e.tipo],
+    );
+    if (!c.rows[0]) throw new ErrorRegistro("CATEGORIA_INVALIDA", 422);
+    categoria = { ...c.rows[0], origen: "memoria" };
+  } else {
+    categoria = await resolverCategoria(client, e.usuarioId, e.tipo, comercio, e.textoOriginal);
+  }
+
+  // 5. Fecha: ISO con offset (webhook) > fecha local a mediodía (manual) > ahora
+  const zona = (await client.query<{ zona_horaria: string }>(`SELECT zona_horaria FROM usuarios WHERE id = $1`, [e.usuarioId])).rows[0]?.zona_horaria ?? "UTC";
+  const fechaSql = e.fechaHoraIso
+    ? `($1::timestamptz AT TIME ZONE 'UTC')`
+    : e.fechaLocal
+      ? `((($1::text || ' 12:00')::timestamp AT TIME ZONE $2) AT TIME ZONE 'UTC')`
+      : `CURRENT_TIMESTAMP`;
+  const fechaParams: string[] = e.fechaHoraIso ? [e.fechaHoraIso] : e.fechaLocal ? [e.fechaLocal, zona] : [];
+
+  // 6. INSERT (los parámetros de fecha van primero)
+  const base = fechaParams.length;
+  const ins = await client.query<{ id: string; fecha_hora: string; fecha: string }>(
+    `INSERT INTO transacciones
+       (cuenta_id, categoria_id, tipo, monto, moneda, fecha_hora, descripcion, origen_insercion, hash_dedup)
+     VALUES ($${base + 1}, $${base + 2}, $${base + 3}::tipo_transaccion, $${base + 4}, $${base + 5}, ${fechaSql}, $${base + 6}, $${base + 7}, $${base + 8})
+     RETURNING id, fecha_hora, to_char(fecha_hora::date, 'YYYY-MM-DD') AS fecha`,
+    [...fechaParams, cuenta.id, categoria.id, e.tipo, monto.toFixed(2), moneda, comercio, e.origen, e.hashDedup ?? null],
+  );
+
+  // 7. Saldo en la moneda de la cuenta, con la cotización de la fecha del movimiento
+  //    (misma regla que las vistas y que eliminarTransaccion: así el saldo siempre cuadra con la suma)
+  const fecha = ins.rows[0].fecha;
+  const conv = await client.query<{ v: string | null }>(`SELECT convertir($1, $2, $3, $4::date) AS v`, [monto, moneda, cuenta.moneda, fecha]);
+  if (conv.rows[0]?.v == null) throw new ErrorRegistro(`SIN_COTIZACION_${moneda}_${cuenta.moneda}`, 500);
+  const delta = Number(conv.rows[0].v) * (e.tipo === "egreso" ? -1 : 1);
+  const upd = await client.query<{ saldo_actual: string }>(
+    `UPDATE cuentas_bancarias SET saldo_actual = saldo_actual + $1 WHERE id = $2 RETURNING saldo_actual`,
+    [delta.toFixed(2), cuenta.id],
+  );
+  if (upd.rowCount !== 1) throw new ErrorRegistro("SALDO_NO_ACTUALIZADO", 500);
+
+  // 8. Importe en moneda principal (para el mensaje)
+  const prin = await client.query<{ v: string | null }>(`SELECT convertir($1, $2, $3, $4::date) AS v`, [monto, moneda, e.monedaPrincipal, fecha]);
+
+  return {
+    duplicado: false,
+    transaccionId: ins.rows[0].id,
+    fechaHora: ins.rows[0].fecha_hora,
+    cuenta, categoria, tipo: e.tipo, monto, moneda, comercio,
+    saldoNuevo: Number(upd.rows[0].saldo_actual),
+    montoPrincipal: prin.rows[0]?.v == null ? null : Number(prin.rows[0].v),
+  };
+}
+
+/** Elimina un movimiento y revierte su efecto en el saldo de la cuenta. */
+export async function eliminarTransaccion(client: PoolClient, usuarioId: string, transaccionId: string): Promise<boolean> {
+  const t = await client.query<{ id: string; cuenta_id: string; tipo: TipoTransaccion; monto: string; moneda: string; fecha: string; moneda_cuenta: string }>(
+    `SELECT t.id, t.cuenta_id, t.tipo, t.monto, t.moneda, t.fecha_hora::date AS fecha, cu.moneda AS moneda_cuenta
+       FROM transacciones t JOIN cuentas_bancarias cu ON cu.id = t.cuenta_id
+      WHERE t.id = $1 AND cu.usuario_id = $2 FOR UPDATE OF t, cu`,
+    [transaccionId, usuarioId],
+  );
+  const row = t.rows[0];
+  if (!row) return false;
+  const conv = await client.query<{ v: string | null }>(`SELECT convertir($1, $2, $3, $4::date) AS v`, [row.monto, row.moneda, row.moneda_cuenta, row.fecha]);
+  const delta = Number(conv.rows[0]?.v ?? 0) * (row.tipo === "egreso" ? 1 : -1); // revertir
+  await client.query(`UPDATE cuentas_bancarias SET saldo_actual = saldo_actual + $1 WHERE id = $2`, [delta.toFixed(2), row.cuenta_id]);
+  await client.query(`DELETE FROM transacciones WHERE id = $1`, [row.id]);
+  return true;
+}
+
+export function fmtMoneda(monto: number, moneda: string): string {
+  try {
+    return new Intl.NumberFormat("es", { style: "currency", currency: moneda }).format(monto);
+  } catch {
+    return `${monto.toFixed(2)} ${moneda}`;
+  }
+}
+
+export function mensajeConfirmacion(r: Extract<ResultadoRegistro, { duplicado: false }>, monedaPrincipal: string): string {
+  const etiqueta = r.tipo === "egreso" ? "Gasto" : "Ingreso";
+  const original = fmtMoneda(r.monto, r.moneda);
+  const convertido = r.moneda !== monedaPrincipal && r.montoPrincipal !== null ? ` (≈ ${fmtMoneda(r.montoPrincipal, monedaPrincipal)})` : "";
+  const sufijo = r.categoria.es_por_clasificar ? " · pendiente de clasificar" : ` · ${r.categoria.nombre_categoria}`;
+  return `✅ ${etiqueta} de ${original}${convertido} en ${r.comercio} registrado con éxito${sufijo}`;
+}
