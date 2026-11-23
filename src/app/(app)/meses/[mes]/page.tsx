@@ -4,12 +4,16 @@ import { notFound } from "next/navigation";
 import { obtenerDetalleMes, formatoMoneda } from "@/lib/queries";
 import { requerirUsuarioId } from "@/lib/usuario";
 import { BotonEliminar } from "@/components/BotonEliminar";
+import { BotonDividir } from "@/components/BotonDividir";
+import { listarCompaneros } from "@/lib/companeros";
+import { pool } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
 export default async function DetalleMes({ params }: { params: Promise<{ mes: string }> }) {
   const { mes } = await params;
-  const d = await obtenerDetalleMes(await requerirUsuarioId(), mes);
+  const usuarioId = await requerirUsuarioId();
+  const [d, companeros] = await Promise.all([obtenerDetalleMes(usuarioId, mes), listarCompaneros(pool, usuarioId)]);
   if (!d) notFound();
   const fmt = (v: number | null) => formatoMoneda(v, d.moneda);
   const egresos = d.porCategoria.filter((c) => c.tipo === "egreso");
@@ -90,8 +94,12 @@ export default async function DetalleMes({ params }: { params: Promise<{ mes: st
                   <div className="flex shrink-0 items-center gap-2">
                     <div className="text-right tabular-nums">
                       <p className={t.tipo === "egreso" ? "text-red-600" : "text-emerald-600"}>{t.tipo === "egreso" ? "−" : "+"}{fmt(t.montoPrincipal)}</p>
+                      {t.companero && <p className="text-xs text-sky-700">tu parte {fmt(t.montoPropio)}{t.saldada ? " · saldado" : ""}</p>}
                       {t.moneda !== d.moneda && <p className="text-xs text-slate-400">{formatoMoneda(t.monto, t.moneda)}</p>}
                     </div>
+                    {t.tipo === "egreso" && (
+                      <BotonDividir id={t.id} companeros={companeros} actual={{ companeroId: t.companeroId, nombre: t.companero, porcentajePropio: t.porcentajePropio }} />
+                    )}
                     <BotonEliminar id={t.id} descripcion={t.descripcion} />
                   </div>
                 </li>

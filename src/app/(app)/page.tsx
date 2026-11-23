@@ -3,6 +3,7 @@ import Link from "next/link";
 import { obtenerResumen, formatoMoneda } from "@/lib/queries";
 import { requerirUsuarioId } from "@/lib/usuario";
 import { BarraPresupuesto } from "@/components/BarraPresupuesto";
+import { BotonSaldar } from "@/components/BotonSaldar";
 
 export const dynamic = "force-dynamic"; // siempre datos frescos desde Neon
 
@@ -55,6 +56,24 @@ export default async function Dashboard() {
           <p className="text-xs text-amber-700">Toca para ajustar</p>
         </Link>
       </section>
+
+      {/* Lo que te deben los compañeros con los que dividiste gastos */}
+      {r.deudas.length > 0 && (
+        <section className="rounded-2xl bg-sky-50 p-4 shadow-sm ring-1 ring-sky-200">
+          <h2 className="text-sm font-semibold text-sky-900">Gastos compartidos</h2>
+          <ul className="mt-2 space-y-2">
+            {r.deudas.map((dd) => (
+              <li key={dd.companeroId} className="flex items-center justify-between gap-3 text-sm">
+                <div className="min-w-0">
+                  <p className="font-medium text-sky-950">{dd.nombre} te debe <span className="tabular-nums">{fmt(dd.pendiente)}</span></p>
+                  <p className="text-xs text-sky-800">{dd.movimientos} gasto{dd.movimientos === 1 ? "" : "s"} sin saldar</p>
+                </div>
+                <BotonSaldar companeroId={dd.companeroId} nombre={dd.nombre} />
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {/* Últimos movimientos */}
       <section className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">

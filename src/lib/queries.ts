@@ -1,6 +1,7 @@
 // src/lib/queries.ts
 import { pool } from "@/lib/db";
 import { asegurarTasasDelDia } from "@/lib/cambio";
+import { obtenerDeudas, type Deuda } from "@/lib/companeros";
 
 export interface ResumenDashboard {
   moneda: string;
@@ -10,17 +11,18 @@ export interface ResumenDashboard {
   cuentas: { id: string; nombre: string; saldo: number; moneda: string; saldoPrincipal: number | null }[];
   presupuestos: { id: string; nombre: string; presupuesto: number; gastado: number }[];
   pendientes: number;
+  deudas: Deuda[]; // lo que te deben los compañeros con los que dividiste gastos
   esteMes: { mes: string; ingresos: number; egresos: number; balance: number };
   ultimos: { id: string; descripcion: string; monto: number; moneda: string; montoPrincipal: number | null; tipo: "ingreso" | "egreso"; categoria: string | null; fecha_hora: string }[];
 }
 
 export async function obtenerResumen(usuarioId: string): Promise<ResumenDashboard> {
   await asegurarTasasDelDia(pool);
-  const [u, saldo, hoy, cuentas, presupuestos, pendientes, ultimos, mesActual] = await Promise.all([
+  const [u, saldo, hoy, cuentas, presupuestos, pendientes, ultimos, mesActual, deudas] = await Promise.all([
     pool.query<{ moneda_principal: string }>(`SELECT moneda_principal FROM usuarios WHERE id = $1`, [usuarioId]),
     pool.query<{ saldo_total: string | null }>(`SELECT saldo_total FROM v_saldo_consolidado WHERE usuario_id = $1`, [usuarioId]),
     pool.query<{ gasto: string; n: string }>(
-      `SELECT COALESCE(SUM(monto_principal), 0) AS gasto, COUNT(*) AS n
+      `SELECT COALESCE(SUM(monto_propio_principal), 0) AS gasto, COUNT(*) AS n
          FROM v_transacciones_principal
         WHERE usuario_id = $1 AND tipo = 'egreso'
           AND fecha_local = ((CURRENT_TIMESTAMP AT TIME ZONE 'UTC') AT TIME ZONE zona_horaria)::date`,
@@ -35,7 +37,7 @@ export async function obtenerResumen(usuarioId: string): Promise<ResumenDashboar
     ),
     pool.query<{ id: string; nombre_categoria: string; presupuesto_mensual: string; gastado: string }>(
       `SELECT c.id, c.nombre_categoria, c.presupuesto_mensual,
-              COALESCE(SUM(t.monto_principal) FILTER (WHERE t.mes = date_trunc('month', (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') AT TIME ZONE t.zona_horaria)::date), 0) AS gastado
+              COALESCE(SUM(t.monto_propio_principal) FILTER (WHERE t.mes = date_trunc('month', (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') AT TIME ZONE t.zona_horaria)::date), 0) AS gastado
          FROM categorias c
          LEFT JOIN v_transacciones_principal t ON t.categoria_id = c.id AND t.tipo = 'egreso'
         WHERE c.usuario_id = $1 AND c.tipo = 'egreso' AND c.presupuesto_mensual > 0
@@ -62,6 +64,7 @@ export async function obtenerResumen(usuarioId: string): Promise<ResumenDashboar
           AND m.mes = date_trunc('month', (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') AT TIME ZONE u.zona_horaria)::date`,
       [usuarioId],
     ),
+    obtenerDeudas(pool, usuarioId),
   ]);
 
   return {
@@ -72,6 +75,7 @@ export async function obtenerResumen(usuarioId: string): Promise<ResumenDashboar
     cuentas: cuentas.rows.map((r) => ({ id: r.id, nombre: r.nombre_cuenta, saldo: Number(r.saldo_actual), moneda: r.moneda, saldoPrincipal: r.saldo_principal == null ? null : Number(r.saldo_principal) })),
     presupuestos: presupuestos.rows.map((r) => ({ id: r.id, nombre: r.nombre_categoria, presupuesto: Number(r.presupuesto_mensual), gastado: Number(r.gastado) })),
     pendientes: Number(pendientes.rows[0].n),
+    deudas,
     esteMes: mesActual.rows[0]
       ? { mes: mesActual.rows[0].mes, ingresos: Number(mesActual.rows[0].ingresos), egresos: Number(mesActual.rows[0].egresos), balance: Number(mesActual.rows[0].balance) }
       : { mes: new Date().toISOString().slice(0, 7), ingresos: 0, egresos: 0, balance: 0 },
@@ -166,7 +170,10 @@ export interface DetalleMes {
   mes: string; etiqueta: string; moneda: string;
   ingresos: number; egresos: number; balance: number;
   porCategoria: { id: string | null; nombre: string; tipo: "ingreso" | "egreso"; total: number; presupuesto: number; movimientos: number }[];
-  dias: { fecha: string; etiqueta: string; total: number; movimientos: { id: string; descripcion: string; categoria: string | null; tipo: "ingreso" | "egreso"; monto: number; moneda: string; montoPrincipal: number | null; origen: string; cuenta: string }[] }[];
+  dias: { fecha: string; etiqueta: string; total: number; movimientos: {
+    id: string; descripcion: string; categoria: string | null; tipo: "ingreso" | "egreso"; monto: number; moneda: string; montoPrincipal: number | null; origen: string; cuenta: string;
+    companero: string | null; companeroId: string | null; porcentajePropio: number; montoPropio: number | null; saldada: boolean;
+  }[] }[];
 }
 
 export async function obtenerDetalleMes(usuarioId: string, mes: string): Promise<DetalleMes | null> {
@@ -176,15 +183,16 @@ export async function obtenerDetalleMes(usuarioId: string, mes: string): Promise
     pool.query<{ moneda_principal: string }>(`SELECT moneda_principal FROM usuarios WHERE id = $1`, [usuarioId]),
     pool.query<{ id: string | null; nombre: string; tipo: "ingreso" | "egreso"; total: string; presupuesto: string; movimientos: string }>(
       `SELECT t.categoria_id AS id, COALESCE(t.nombre_categoria, 'Por clasificar') AS nombre, t.tipo,
-              COALESCE(SUM(t.monto_principal), 0) AS total, COALESCE(MAX(c.presupuesto_mensual), 0) AS presupuesto, COUNT(*) AS movimientos
+              COALESCE(SUM(t.monto_propio_principal), 0) AS total, COALESCE(MAX(c.presupuesto_mensual), 0) AS presupuesto, COUNT(*) AS movimientos
          FROM v_transacciones_principal t LEFT JOIN categorias c ON c.id = t.categoria_id
         WHERE t.usuario_id = $1 AND t.mes = $2::date
         GROUP BY t.categoria_id, t.nombre_categoria, t.tipo
         ORDER BY t.tipo, total DESC`,
       [usuarioId, mesDate],
     ),
-    pool.query<{ id: string; fecha_local: string; descripcion: string | null; categoria: string | null; tipo: "ingreso" | "egreso"; monto: string; moneda: string; monto_principal: string | null; origen_insercion: string; nombre_cuenta: string }>(
-      `SELECT id, to_char(fecha_local, 'YYYY-MM-DD') AS fecha_local, descripcion, nombre_categoria AS categoria, tipo, monto, moneda, monto_principal, origen_insercion, nombre_cuenta
+    pool.query<{ id: string; fecha_local: string; descripcion: string | null; categoria: string | null; tipo: "ingreso" | "egreso"; monto: string; moneda: string; monto_principal: string | null; origen_insercion: string; nombre_cuenta: string; companero_nombre: string | null; companero_id: string | null; porcentaje_propio: string; monto_propio_principal: string | null; saldada_en: Date | null }>(
+      `SELECT id, to_char(fecha_local, 'YYYY-MM-DD') AS fecha_local, descripcion, nombre_categoria AS categoria, tipo, monto, moneda, monto_principal, origen_insercion, nombre_cuenta,
+              companero_nombre, companero_id, porcentaje_propio, monto_propio_principal, saldada_en
          FROM v_transacciones_principal WHERE usuario_id = $1 AND mes = $2::date
         ORDER BY fecha_hora DESC`,
       [usuarioId, mesDate],
@@ -199,8 +207,12 @@ export async function obtenerDetalleMes(usuarioId: string, mes: string): Promise
     const etiquetaDia = new Intl.DateTimeFormat("es", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" }).format(new Date(`${r.fecha_local}T00:00:00Z`));
     const d = diasMap.get(r.fecha_local) ?? { fecha: r.fecha_local, etiqueta: etiquetaDia.charAt(0).toUpperCase() + etiquetaDia.slice(1), total: 0, movimientos: [] };
     const mp = r.monto_principal == null ? null : Number(r.monto_principal);
-    d.movimientos.push({ id: r.id, descripcion: r.descripcion ?? "", categoria: r.categoria, tipo: r.tipo, monto: Number(r.monto), moneda: r.moneda, montoPrincipal: mp, origen: r.origen_insercion, cuenta: r.nombre_cuenta });
-    d.total += (mp ?? 0) * (r.tipo === "egreso" ? -1 : 1);
+    const propio = r.monto_propio_principal == null ? null : Number(r.monto_propio_principal);
+    d.movimientos.push({
+      id: r.id, descripcion: r.descripcion ?? "", categoria: r.categoria, tipo: r.tipo, monto: Number(r.monto), moneda: r.moneda, montoPrincipal: mp, origen: r.origen_insercion, cuenta: r.nombre_cuenta,
+      companero: r.companero_nombre, companeroId: r.companero_id, porcentajePropio: Number(r.porcentaje_propio), montoPropio: propio, saldada: r.saldada_en != null,
+    });
+    d.total += (propio ?? 0) * (r.tipo === "egreso" ? -1 : 1); // el total del día cuenta solo tu parte
     diasMap.set(r.fecha_local, d);
   }
   return { mes, etiqueta: etiquetaMes(mes), moneda, ingresos, egresos, balance: ingresos - egresos, porCategoria, dias: [...diasMap.values()] };

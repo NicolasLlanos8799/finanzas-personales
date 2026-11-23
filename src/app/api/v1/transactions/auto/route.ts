@@ -18,6 +18,9 @@ const BodySchema = z.object({
   tipo: z.enum(["ingreso", "egreso"]).optional(),
   cuenta: z.string().trim().min(1).max(100).optional(),
   fecha_hora: z.iso.datetime({ offset: true }).optional(),
+  // Opcionales para atajos que ya sepan con quién dividir (nombre de un compañero guardado en Ajustes)
+  dividir_con: z.string().trim().min(1).max(40).optional(),
+  porcentaje_propio: z.number().gt(0).lt(100).optional(),
 });
 
 /** Convierte cualquier valor que mande iOS (texto, lista, objeto) en un solo texto. */
@@ -102,17 +105,19 @@ export async function POST(req: NextRequest) {
         const soloComercioSinCifras = !!body.texto_original && !/\d/.test(body.texto_original);
         throw new ErrorRegistro(soloComercioSinCifras ? "SOLO_COMERCIO_SIN_IMPORTE" : "MONTO_NO_RECONOCIDO", 422);
       }
-      if (!comercio) throw new ErrorRegistro("COMERCIO_NO_RECONOCIDO", 422);
+      // Un comercio que no se pudo leer NO impide registrar el pago: se guarda como
+      // «Comercio desconocido» en «Por clasificar» y la web pregunta a qué rubro pertenece.
 
       const hash = createHash("sha256")
-        .update(`${usuario.id}|${body.texto_original ?? ""}|${tipo}|${monto.toFixed(2)}|${moneda}|${comercio.toLowerCase()}|${new Date().toISOString().slice(0, 16)}`)
+        .update(`${usuario.id}|${body.texto_original ?? ""}|${tipo}|${monto.toFixed(2)}|${moneda}|${(comercio ?? "").toLowerCase()}|${new Date().toISOString().slice(0, 16)}`)
         .digest("hex");
 
       return registrarTransaccion(client, {
         usuarioId: usuario.id, monedaPrincipal: usuario.moneda_principal,
-        cuentaIdent: body.cuenta, monto, moneda, comercio, tipo,
+        cuentaIdent: body.cuenta, monto, moneda, comercio: comercio ?? "", tipo,
         fechaHoraIso: body.fecha_hora, textoOriginal: body.texto_original,
         origen: "Webhook_iOS", hashDedup: hash,
+        dividirCon: body.dividir_con, porcentajePropio: body.porcentaje_propio,
       });
     });
 
@@ -131,6 +136,12 @@ export async function POST(req: NextRequest) {
         monto_principal: resultado.montoPrincipal, moneda_principal: usuario.moneda_principal,
         comercio: resultado.comercio, cuenta: resultado.cuenta.nombre_cuenta, moneda_cuenta: resultado.cuenta.moneda,
         categoria: resultado.categoria.nombre_categoria, categoria_origen: resultado.categoria.origen, por_clasificar: resultado.categoria.es_por_clasificar,
+        // Si no se conoce el rubro, el movimiento ya está guardado y se pide clasificarlo aquí
+        pregunta_rubro: resultado.categoria.es_por_clasificar,
+        clasificar_url: resultado.categoria.es_por_clasificar ? `${req.nextUrl.origin}/clasificar` : null,
+        division: resultado.division
+          ? { companero: resultado.division.companero, porcentaje_propio: resultado.division.porcentajePropio, monto_propio: resultado.division.montoPropio, recordada: resultado.division.recordada }
+          : null,
         saldo_nuevo: resultado.saldoNuevo, fecha_hora: resultado.fechaHora,
         mensaje_notificacion: mensajeConfirmacion(resultado, usuario.moneda_principal),
       },

@@ -7,8 +7,9 @@ import { MONEDAS_SOPORTADAS } from "@/lib/parseo";
 
 interface Categoria { id: string; nombre: string; tipo: "ingreso" | "egreso" }
 interface Cuenta { id: string; nombre: string; moneda: string }
+interface Companero { id: string; nombre: string }
 
-export function FormNuevo({ categorias, cuentas, hoy }: { categorias: Categoria[]; cuentas: Cuenta[]; hoy: string }) {
+export function FormNuevo({ categorias, cuentas, companeros, hoy }: { categorias: Categoria[]; cuentas: Cuenta[]; companeros: Companero[]; hoy: string }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [tipo, setTipo] = useState<"egreso" | "ingreso">("egreso");
@@ -18,6 +19,9 @@ export function FormNuevo({ categorias, cuentas, hoy }: { categorias: Categoria[
   const [comercio, setComercio] = useState("");
   const [categoriaId, setCategoriaId] = useState("");
   const [fecha, setFecha] = useState(hoy);
+  const [companeroId, setCompaneroId] = useState(""); // "" = solo yo
+  const [porcentaje, setPorcentaje] = useState(50);   // tu parte
+  const [recordarDivision, setRecordarDivision] = useState(false);
   const [estado, setEstado] = useState<"idle" | "guardando" | "ok" | "error">("idle");
   const [mensaje, setMensaje] = useState("");
 
@@ -31,13 +35,16 @@ export function FormNuevo({ categorias, cuentas, hoy }: { categorias: Categoria[
       const res = await fetch("/api/v1/transactions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tipo, monto, moneda, comercio, categoria_id: categoriaId || null, cuenta_id: cuentaId || undefined, fecha }),
+        body: JSON.stringify({
+          tipo, monto, moneda, comercio, categoria_id: categoriaId || null, cuenta_id: cuentaId || undefined, fecha,
+          ...(tipo === "egreso" && companeroId ? { companero_id: companeroId, porcentaje_propio: porcentaje, recordar_division: recordarDivision } : {}),
+        }),
       });
       const j = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(j.mensaje ?? `Error ${res.status}`);
       setEstado("ok");
       setMensaje(j.mensaje ?? "Guardado");
-      setMonto(""); setComercio(""); setCategoriaId("");
+      setMonto(""); setComercio(""); setCategoriaId(""); setCompaneroId(""); setRecordarDivision(false);
       startTransition(() => router.refresh());
     } catch (err) {
       setEstado("error");
@@ -52,7 +59,7 @@ export function FormNuevo({ categorias, cuentas, hoy }: { categorias: Categoria[
     <form onSubmit={enviar} className="space-y-4">
       <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1" role="radiogroup" aria-label="Tipo">
         {(["egreso", "ingreso"] as const).map((t) => (
-          <button key={t} type="button" role="radio" aria-checked={tipo === t} onClick={() => { setTipo(t); setCategoriaId(""); }}
+          <button key={t} type="button" role="radio" aria-checked={tipo === t} onClick={() => { setTipo(t); setCategoriaId(""); setCompaneroId(""); }}
             className={`h-11 rounded-lg text-sm font-medium transition ${tipo === t ? (t === "egreso" ? "bg-red-600 text-white" : "bg-emerald-600 text-white") : "text-slate-600"}`}>
             {t === "egreso" ? "Gasto" : "Ingreso"}
           </button>
@@ -84,6 +91,40 @@ export function FormNuevo({ categorias, cuentas, hoy }: { categorias: Categoria[
           {opciones.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
         </select>
       </div>
+
+      {tipo === "egreso" && (
+        <div>
+          <span className={label} id="dividir-lbl">Dividir con</span>
+          {companeros.length === 0 ? (
+            <p className="rounded-xl bg-slate-50 p-3 text-xs text-slate-500">¿Compartes gastos con alguien? Guárdalo en <a href="/ajustes" className="font-medium text-slate-900 underline underline-offset-4">Ajustes</a> y lo eliges aquí con un toque.</p>
+          ) : (
+            <>
+              <div className="flex flex-wrap gap-2" role="radiogroup" aria-labelledby="dividir-lbl">
+                {[{ id: "", nombre: "Solo yo" }, ...companeros].map((c) => (
+                  <button key={c.id || "yo"} type="button" role="radio" aria-checked={companeroId === c.id} onClick={() => setCompaneroId(c.id)}
+                    className={`h-11 rounded-full px-4 text-sm font-medium transition ${companeroId === c.id ? "bg-sky-700 text-white" : "bg-slate-100 text-slate-800 active:bg-slate-200"}`}>
+                    {c.id ? `Con ${c.nombre}` : c.nombre}
+                  </button>
+                ))}
+              </div>
+              {companeroId && (
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-sky-50 p-3 text-sm">
+                  <label className="flex items-center gap-2">
+                    Tu parte
+                    <select value={porcentaje} onChange={(e) => setPorcentaje(Number(e.target.value))} className="h-10 rounded-lg border border-slate-300 bg-white px-2">
+                      {[75, 70, 60, 50, 40, 30, 25].map((p) => <option key={p} value={p}>{p} %</option>)}
+                    </select>
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-slate-700">
+                    <input type="checkbox" checked={recordarDivision} onChange={(e) => setRecordarDivision(e.target.checked)} className="size-4" />
+                    Siempre dividir este comercio
+                  </label>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-2">
         <div>

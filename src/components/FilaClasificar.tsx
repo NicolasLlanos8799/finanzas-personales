@@ -54,20 +54,21 @@ export function FilaClasificar({ transaccion, categorias }: { transaccion: Trans
         </div>
       </div>
 
-      <label className="mt-3 block">
-        <span className="sr-only">Categoría</span>
-        <select
-          defaultValue=""
-          disabled={ocupado || estado === "ok"}
-          onChange={(e) => guardar(e.target.value)}
-          className="h-12 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 text-base focus:border-slate-900 focus:outline-none disabled:opacity-60"
-        >
-          <option value="" disabled>Elegir categoría…</option>
-          {categorias.map((c) => (
-            <option key={c.id} value={c.id}>{c.nombre}</option>
-          ))}
-        </select>
-      </label>
+      <p id={`rubro-${transaccion.id}`} className="mt-3 text-sm font-medium">¿A qué rubro pertenece?</p>
+      <div className="mt-2 flex flex-wrap gap-2" role="group" aria-labelledby={`rubro-${transaccion.id}`}>
+        {categorias.map((c) => (
+          <button
+            key={c.id}
+            type="button"
+            disabled={ocupado || estado === "ok"}
+            onClick={() => guardar(c.id)}
+            className="h-11 rounded-full bg-slate-100 px-4 text-sm font-medium text-slate-800 active:bg-slate-900 active:text-white disabled:opacity-60"
+          >
+            {c.nombre}
+          </button>
+        ))}
+      </div>
+      <p className="mt-2 text-xs text-slate-500">Recordaré este comercio para clasificarlo solo la próxima vez.</p>
 
       <p className="mt-1 h-4 text-xs" aria-live="polite">
         {estado === "guardando" && <span className="text-slate-500">Guardando…</span>}
