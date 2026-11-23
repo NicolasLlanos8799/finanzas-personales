@@ -2,6 +2,7 @@
 import { pool } from "@/lib/db";
 import { asegurarTasasDelDia } from "@/lib/cambio";
 import { obtenerDeudas, type Deuda } from "@/lib/companeros";
+import type { Movimiento } from "@/lib/tipos";
 
 export interface ResumenDashboard {
   moneda: string;
@@ -13,7 +14,27 @@ export interface ResumenDashboard {
   pendientes: number;
   deudas: Deuda[]; // lo que te deben los compañeros con los que dividiste gastos
   esteMes: { mes: string; ingresos: number; egresos: number; balance: number };
-  ultimos: { id: string; descripcion: string; monto: number; moneda: string; montoPrincipal: number | null; tipo: "ingreso" | "egreso"; categoria: string | null; fecha_hora: string }[];
+  ultimos: Movimiento[];
+}
+
+/** Fila de v_transacciones_principal con lo necesario para la ventana de detalle de un movimiento. */
+interface FilaMovimiento {
+  id: string; descripcion: string | null; tipo: "ingreso" | "egreso"; categoria: string | null; categoria_id: string | null; es_por_clasificar: boolean | null;
+  monto: string; moneda: string; monto_principal: string | null; monto_propio_principal: string | null;
+  companero_nombre: string | null; companero_id: string | null; porcentaje_propio: string; saldada_en: Date | null;
+  fecha_local: string; hora_local: string; nombre_cuenta: string; origen_insercion: string;
+}
+
+function aMovimiento(r: FilaMovimiento): Movimiento {
+  return {
+    id: r.id, descripcion: r.descripcion ?? "", tipo: r.tipo,
+    categoria: r.categoria, categoriaId: r.categoria_id, esPorClasificar: !!r.es_por_clasificar,
+    monto: Number(r.monto), moneda: r.moneda,
+    montoPrincipal: r.monto_principal == null ? null : Number(r.monto_principal),
+    montoPropio: r.monto_propio_principal == null ? null : Number(r.monto_propio_principal),
+    companero: r.companero_nombre, companeroId: r.companero_id, porcentajePropio: Number(r.porcentaje_propio), saldada: r.saldada_en != null,
+    fechaLocal: r.fecha_local, horaLocal: r.hora_local, cuenta: r.nombre_cuenta, origen: r.origen_insercion,
+  };
 }
 
 export async function obtenerResumen(usuarioId: string): Promise<ResumenDashboard> {
@@ -51,9 +72,14 @@ export async function obtenerResumen(usuarioId: string): Promise<ResumenDashboar
         WHERE t.usuario_id = $1 AND (t.categoria_id IS NULL OR ca.es_por_clasificar)`,
       [usuarioId],
     ),
-    pool.query<{ id: string; descripcion: string | null; monto: string; moneda: string; monto_principal: string | null; tipo: "ingreso" | "egreso"; categoria: string | null; fecha_hora: Date }>(
-      `SELECT t.id, t.descripcion, t.monto, t.moneda, t.monto_principal, t.tipo, ca.nombre_categoria AS categoria, t.fecha_hora
-         FROM v_transacciones_principal t LEFT JOIN categorias ca ON ca.id = t.categoria_id
+    pool.query<FilaMovimiento>(
+      `SELECT t.id, t.descripcion, t.tipo, t.nombre_categoria AS categoria, t.categoria_id, t.es_por_clasificar,
+              t.monto, t.moneda, t.monto_principal, t.monto_propio_principal,
+              t.companero_nombre, t.companero_id, t.porcentaje_propio, t.saldada_en,
+              to_char(t.fecha_local, 'YYYY-MM-DD') AS fecha_local,
+              to_char((t.fecha_hora AT TIME ZONE 'UTC') AT TIME ZONE t.zona_horaria, 'HH24:MI') AS hora_local,
+              t.nombre_cuenta, t.origen_insercion
+         FROM v_transacciones_principal t
         WHERE t.usuario_id = $1 ORDER BY t.fecha_hora DESC LIMIT 8`,
       [usuarioId],
     ),
@@ -79,7 +105,7 @@ export async function obtenerResumen(usuarioId: string): Promise<ResumenDashboar
     esteMes: mesActual.rows[0]
       ? { mes: mesActual.rows[0].mes, ingresos: Number(mesActual.rows[0].ingresos), egresos: Number(mesActual.rows[0].egresos), balance: Number(mesActual.rows[0].balance) }
       : { mes: new Date().toISOString().slice(0, 7), ingresos: 0, egresos: 0, balance: 0 },
-    ultimos: ultimos.rows.map((r) => ({ id: r.id, descripcion: r.descripcion ?? "", monto: Number(r.monto), moneda: r.moneda, montoPrincipal: r.monto_principal == null ? null : Number(r.monto_principal), tipo: r.tipo, categoria: r.categoria, fecha_hora: new Date(r.fecha_hora).toISOString() })),
+    ultimos: ultimos.rows.map(aMovimiento),
   };
 }
 
@@ -170,10 +196,7 @@ export interface DetalleMes {
   mes: string; etiqueta: string; moneda: string;
   ingresos: number; egresos: number; balance: number;
   porCategoria: { id: string | null; nombre: string; tipo: "ingreso" | "egreso"; total: number; presupuesto: number; movimientos: number }[];
-  dias: { fecha: string; etiqueta: string; total: number; movimientos: {
-    id: string; descripcion: string; categoria: string | null; tipo: "ingreso" | "egreso"; monto: number; moneda: string; montoPrincipal: number | null; origen: string; cuenta: string;
-    companero: string | null; companeroId: string | null; porcentajePropio: number; montoPropio: number | null; saldada: boolean;
-  }[] }[];
+  dias: { fecha: string; etiqueta: string; total: number; movimientos: Movimiento[] }[];
 }
 
 export async function obtenerDetalleMes(usuarioId: string, mes: string): Promise<DetalleMes | null> {
@@ -190,9 +213,13 @@ export async function obtenerDetalleMes(usuarioId: string, mes: string): Promise
         ORDER BY t.tipo, total DESC`,
       [usuarioId, mesDate],
     ),
-    pool.query<{ id: string; fecha_local: string; descripcion: string | null; categoria: string | null; tipo: "ingreso" | "egreso"; monto: string; moneda: string; monto_principal: string | null; origen_insercion: string; nombre_cuenta: string; companero_nombre: string | null; companero_id: string | null; porcentaje_propio: string; monto_propio_principal: string | null; saldada_en: Date | null }>(
-      `SELECT id, to_char(fecha_local, 'YYYY-MM-DD') AS fecha_local, descripcion, nombre_categoria AS categoria, tipo, monto, moneda, monto_principal, origen_insercion, nombre_cuenta,
-              companero_nombre, companero_id, porcentaje_propio, monto_propio_principal, saldada_en
+    pool.query<FilaMovimiento>(
+      `SELECT id, descripcion, tipo, nombre_categoria AS categoria, categoria_id, es_por_clasificar,
+              monto, moneda, monto_principal, monto_propio_principal,
+              companero_nombre, companero_id, porcentaje_propio, saldada_en,
+              to_char(fecha_local, 'YYYY-MM-DD') AS fecha_local,
+              to_char((fecha_hora AT TIME ZONE 'UTC') AT TIME ZONE zona_horaria, 'HH24:MI') AS hora_local,
+              nombre_cuenta, origen_insercion
          FROM v_transacciones_principal WHERE usuario_id = $1 AND mes = $2::date
         ORDER BY fecha_hora DESC`,
       [usuarioId, mesDate],
@@ -206,13 +233,9 @@ export async function obtenerDetalleMes(usuarioId: string, mes: string): Promise
   for (const r of movs.rows) {
     const etiquetaDia = new Intl.DateTimeFormat("es", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" }).format(new Date(`${r.fecha_local}T00:00:00Z`));
     const d = diasMap.get(r.fecha_local) ?? { fecha: r.fecha_local, etiqueta: etiquetaDia.charAt(0).toUpperCase() + etiquetaDia.slice(1), total: 0, movimientos: [] };
-    const mp = r.monto_principal == null ? null : Number(r.monto_principal);
-    const propio = r.monto_propio_principal == null ? null : Number(r.monto_propio_principal);
-    d.movimientos.push({
-      id: r.id, descripcion: r.descripcion ?? "", categoria: r.categoria, tipo: r.tipo, monto: Number(r.monto), moneda: r.moneda, montoPrincipal: mp, origen: r.origen_insercion, cuenta: r.nombre_cuenta,
-      companero: r.companero_nombre, companeroId: r.companero_id, porcentajePropio: Number(r.porcentaje_propio), montoPropio: propio, saldada: r.saldada_en != null,
-    });
-    d.total += (propio ?? 0) * (r.tipo === "egreso" ? -1 : 1); // el total del día cuenta solo tu parte
+    const m = aMovimiento(r);
+    d.movimientos.push(m);
+    d.total += (m.montoPropio ?? 0) * (m.tipo === "egreso" ? -1 : 1); // el total del día cuenta solo tu parte
     diasMap.set(r.fecha_local, d);
   }
   return { mes, etiqueta: etiquetaMes(mes), moneda, ingresos, egresos, balance: ingresos - egresos, porCategoria, dias: [...diasMap.values()] };
