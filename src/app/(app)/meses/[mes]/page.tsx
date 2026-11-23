@@ -1,10 +1,9 @@
 // src/app/meses/[mes]/page.tsx — detalle de un mes
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { obtenerDetalleMes, formatoMoneda } from "@/lib/queries";
+import { obtenerDetalleMes, obtenerCategorias, formatoMoneda } from "@/lib/queries";
 import { requerirUsuarioId } from "@/lib/usuario";
-import { BotonEliminar } from "@/components/BotonEliminar";
-import { BotonDividir } from "@/components/BotonDividir";
+import { MovimientoItem } from "@/components/MovimientoItem";
 import { listarCompaneros } from "@/lib/companeros";
 import { pool } from "@/lib/db";
 
@@ -13,7 +12,7 @@ export const dynamic = "force-dynamic";
 export default async function DetalleMes({ params }: { params: Promise<{ mes: string }> }) {
   const { mes } = await params;
   const usuarioId = await requerirUsuarioId();
-  const [d, companeros] = await Promise.all([obtenerDetalleMes(usuarioId, mes), listarCompaneros(pool, usuarioId)]);
+  const [d, companeros, categorias] = await Promise.all([obtenerDetalleMes(usuarioId, mes), listarCompaneros(pool, usuarioId), obtenerCategorias(usuarioId)]);
   if (!d) notFound();
   const fmt = (v: number | null) => formatoMoneda(v, d.moneda);
   const egresos = d.porCategoria.filter((c) => c.tipo === "egreso");
@@ -86,24 +85,7 @@ export default async function DetalleMes({ params }: { params: Promise<{ mes: st
             </div>
             <ul className="mt-2 divide-y divide-slate-100">
               {dia.movimientos.map((t) => (
-                <li key={t.id} className="flex items-center justify-between gap-2 py-2 text-sm">
-                  <div className="min-w-0">
-                    <p className="truncate font-medium">{t.descripcion || "Sin descripción"}</p>
-                    <p className="text-xs text-slate-500">{t.categoria ?? "Por clasificar"} · {t.origen === "Manual_Web" ? "manual" : "iPhone"}</p>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <div className="text-right tabular-nums">
-                      <p className={t.tipo === "egreso" ? "text-red-600" : "text-emerald-600"}>{t.tipo === "egreso" ? "−" : "+"}{fmt(t.montoPrincipal)}</p>
-                      {t.companero && <p className="text-xs text-sky-700">tu parte {fmt(t.montoPropio)}{t.saldada ? " · saldado" : ""}</p>}
-                      {t.moneda !== d.moneda && <p className="text-xs text-slate-400">{formatoMoneda(t.monto, t.moneda)}</p>}
-                    </div>
-                    <Link href={`/editar/${t.id}`} aria-label={`Editar ${t.descripcion || "movimiento"}`} className="rounded-lg px-2 py-1 text-xs text-slate-500 active:bg-slate-100">✎</Link>
-                    {t.tipo === "egreso" && (
-                      <BotonDividir id={t.id} companeros={companeros} actual={{ companeroId: t.companeroId, nombre: t.companero, porcentajePropio: t.porcentajePropio }} />
-                    )}
-                    <BotonEliminar id={t.id} descripcion={t.descripcion} />
-                  </div>
-                </li>
+                <MovimientoItem key={t.id} m={t} companeros={companeros} categorias={categorias} monedaPrincipal={d.moneda} />
               ))}
             </ul>
           </div>
