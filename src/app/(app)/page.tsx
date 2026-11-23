@@ -3,6 +3,7 @@ import Link from "next/link";
 import { obtenerResumen, formatoMoneda } from "@/lib/queries";
 import { requerirUsuarioId } from "@/lib/usuario";
 import { BarraPresupuesto } from "@/components/BarraPresupuesto";
+import { BotonSaldar } from "@/components/BotonSaldar";
 
 export const dynamic = "force-dynamic"; // siempre datos frescos desde Neon
 
@@ -56,6 +57,24 @@ export default async function Dashboard() {
         </Link>
       </section>
 
+      {/* Lo que te deben los compañeros con los que dividiste gastos */}
+      {r.deudas.length > 0 && (
+        <section className="rounded-2xl bg-sky-50 p-4 shadow-sm ring-1 ring-sky-200">
+          <h2 className="text-sm font-semibold text-sky-900">Gastos compartidos</h2>
+          <ul className="mt-2 space-y-2">
+            {r.deudas.map((dd) => (
+              <li key={dd.companeroId} className="flex items-center justify-between gap-3 text-sm">
+                <div className="min-w-0">
+                  <p className="font-medium text-sky-950">{dd.nombre} te debe <span className="tabular-nums">{fmt(dd.pendiente)}</span></p>
+                  <p className="text-xs text-sky-800">{dd.movimientos} gasto{dd.movimientos === 1 ? "" : "s"} sin saldar</p>
+                </div>
+                <BotonSaldar companeroId={dd.companeroId} nombre={dd.nombre} />
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       {/* Últimos movimientos */}
       <section className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
         <h2 className="text-sm font-semibold">Últimos movimientos</h2>
@@ -69,9 +88,12 @@ export default async function Dashboard() {
                   <p className="truncate font-medium">{t.descripcion || "Sin descripción"}</p>
                   <p className="text-xs text-slate-500">{t.categoria ?? "Por clasificar"} · {new Intl.DateTimeFormat("es", { day: "2-digit", month: "short" }).format(new Date(t.fecha_hora))}</p>
                 </div>
-                <div className="shrink-0 text-right tabular-nums">
-                  <p className={t.tipo === "egreso" ? "text-red-600" : "text-emerald-600"}>{t.tipo === "egreso" ? "−" : "+"}{fmt(t.montoPrincipal)}</p>
-                  {t.moneda !== r.moneda ? <p className="text-xs text-slate-400">{formatoMoneda(t.monto, t.moneda)}</p> : null}
+                <div className="flex shrink-0 items-center gap-2">
+                  <div className="text-right tabular-nums">
+                    <p className={t.tipo === "egreso" ? "text-red-600" : "text-emerald-600"}>{t.tipo === "egreso" ? "−" : "+"}{fmt(t.montoPrincipal)}</p>
+                    {t.moneda !== r.moneda ? <p className="text-xs text-slate-400">{formatoMoneda(t.monto, t.moneda)}</p> : null}
+                  </div>
+                  <Link href={`/editar/${t.id}`} aria-label={`Editar ${t.descripcion || "movimiento"}`} className="rounded-lg px-2 py-1 text-xs text-slate-500 active:bg-slate-100">✎</Link>
                 </div>
               </li>
             ))}

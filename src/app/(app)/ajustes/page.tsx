@@ -5,12 +5,15 @@ import { requerirUsuarioId } from "@/lib/usuario";
 import { FormAjustes } from "@/components/FormAjustes";
 import { FormPresupuestos } from "@/components/FormPresupuestos";
 import { FormClave } from "@/components/FormClave";
+import { FormCompaneros } from "@/components/FormCompaneros";
+import { listarCompaneros } from "@/lib/companeros";
+import { pool } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
 export default async function Ajustes() {
   const usuarioId = await requerirUsuarioId();
-  const [a, presupuestos] = await Promise.all([obtenerAjustes(usuarioId), obtenerPresupuestos(usuarioId)]);
+  const [a, presupuestos, companeros] = await Promise.all([obtenerAjustes(usuarioId), obtenerPresupuestos(usuarioId), listarCompaneros(pool, usuarioId)]);
   return (
     <div className="space-y-4">
       <header>
@@ -27,6 +30,7 @@ export default async function Ajustes() {
       </Link>
 
       <FormAjustes monedaPrincipal={a.moneda_principal} zonaHoraria={a.zona_horaria} cuentas={a.cuentas} />
+      <FormCompaneros companeros={companeros} />
       <FormPresupuestos filas={presupuestos} moneda={a.moneda_principal} />
       <FormClave />
 
